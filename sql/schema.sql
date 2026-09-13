@@ -163,6 +163,18 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_queue` (
   KEY `idx_proposal` (`proposal_id`),
   KEY `idx_mix_queue_mode_waiting` (`mode`,`proposal_id`,`joined_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_rewards` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `accid` int(11) NOT NULL,
+  `kind` enum('daily','weekly') NOT NULL COMMENT 'daily = Gold 1 dia transferible; weekly = Premium 2 dias',
+  `period_key` varchar(10) NOT NULL COMMENT 'daily: fecha YYYY-MM-DD; weekly: semana ISO YYYY-Www',
+  `lobby_id` int(11) NOT NULL COMMENT 'Partida 5v5 ganada que dio el premio',
+  `inventory_item_id` int(11) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_mix_rewards_period` (`accid`,`kind`,`period_key`),
+  KEY `idx_mix_rewards_lobby` (`lobby_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -718,6 +730,10 @@ main: BEGIN
         server_password = NULL
     WHERE id = p_lobby_id AND status = 'live';
 
+    IF p_score_a <> p_score_b THEN
+        CALL zgaming_web.MixGrantMatchRewards(p_lobby_id, IF(p_score_a > p_score_b, 'A', 'B'));
+    END IF;
+
     COMMIT;
 END$$
 
@@ -781,6 +797,128 @@ BEGIN
           AND abandoned_at IS NULL
         ORDER BY team, is_captain DESC, pick_order;
     END IF;
+END$$
+
+-- Premios por ganar partidas 5v5 (no de prueba, sin haber abandonado):
+--   * semanal: la primera victoria de la semana (lunes a domingo) da un
+--     Premium de 2 dias, ligado a la cuenta;
+--   * diario: la primera victoria del dia da un Gold de 1 dia transferible,
+--     como mucho una vez cada 3 dias.
+-- Se llama desde MixFinishMatch, dentro de su transaccion. No devuelve filas:
+-- el plugin lee la respuesta de MixFinishMatch y un resultado de mas le
+-- desordena la conexion. Por eso inserta directo en el inventario en vez de
+-- usar inventory_grant_item, que termina con un SELECT.
+-- Un error aca no puede dejar la partida sin cerrar: se deshace solo lo del
+-- premio (SAVEPOINT) y la partida sigue su curso.
+DROP PROCEDURE IF EXISTS `zgaming_web`.`MixGrantMatchRewards`$$
+CREATE PROCEDURE `zgaming_web`.`MixGrantMatchRewards`(
+    IN p_lobby_id INT,
+    IN p_winner_team CHAR(1)
+)
+main: BEGIN
+    DECLARE v_mode VARCHAR(4) DEFAULT NULL;
+    DECLARE v_is_test TINYINT DEFAULT 1;
+    DECLARE v_day VARCHAR(10);
+    DECLARE v_week VARCHAR(10);
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK TO SAVEPOINT mix_rewards;
+    END;
+
+    SAVEPOINT mix_rewards;
+
+    SELECT mode, is_test INTO v_mode, v_is_test
+    FROM zgaming_web.mix_lobbies
+    WHERE id = p_lobby_id
+    LIMIT 1;
+
+    IF v_mode IS NULL OR v_mode <> '5v5' OR v_is_test <> 0 OR p_winner_team NOT IN ('A', 'B') THEN
+        LEAVE main;
+    END IF;
+
+    -- La base corre en hora de Chile (-03:00), igual que la web.
+    SET v_day  = DATE_FORMAT(CURDATE(), '%Y-%m-%d');
+    SET v_week = CONCAT(LEFT(YEARWEEK(CURDATE(), 3), 4), '-W', RIGHT(YEARWEEK(CURDATE(), 3), 2));
+
+    -- Reservar primero: la clave unica evita entregar dos veces el mismo
+    -- periodo aunque MixFinishMatch se repita.
+    INSERT IGNORE INTO zgaming_web.mix_rewards (accid, kind, period_key, lobby_id)
+    SELECT p.accid, 'weekly', v_week, p_lobby_id
+    FROM zgaming_web.mix_lobby_players p
+    WHERE p.lobby_id = p_lobby_id
+      AND p.team = p_winner_team
+      AND p.abandoned_at IS NULL;
+
+    -- Diario: si el ultimo Gold fue hace menos de 3 dias, no toca.
+    INSERT IGNORE INTO zgaming_web.mix_rewards (accid, kind, period_key, lobby_id)
+    SELECT p.accid, 'daily', v_day, p_lobby_id
+    FROM zgaming_web.mix_lobby_players p
+    WHERE p.lobby_id = p_lobby_id
+      AND p.team = p_winner_team
+      AND p.abandoned_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM zgaming_web.mix_rewards d
+          WHERE d.accid = p.accid
+            AND d.kind = 'daily'
+            AND d.period_key > DATE_FORMAT(CURDATE() - INTERVAL 3 DAY, '%Y-%m-%d')
+      );
+
+    INSERT INTO zgaming_web.inventory_items (
+        accid, name, description, icon, color, item_type,
+        privilege_access, privilege_server_id, privilege_duration_days,
+        require_access, revoke_on_access_loss, transferable, allow_server_change,
+        status, granted_by, grant_reason, grant_source
+    )
+    SELECT r.accid,
+           IF(r.kind = 'weekly', 'Premium 2 días (MIX semanal)', 'Gold 1 día (MIX diario)'),
+           IF(r.kind = 'weekly',
+              'Premio por ganar tu primera partida 5v5 de la semana.',
+              'Premio por ganar tu primera partida 5v5 del día. Puedes transferirlo.'),
+           'Crown', '#f59e0b', 'privilege',
+           IF(r.kind = 'weekly', 'g', 'h'), NULL, IF(r.kind = 'weekly', 2, 1),
+           NULL, 0, IF(r.kind = 'weekly', 0, 1), 0,
+           'available', NULL,
+           CONCAT('MIX ', IF(r.kind = 'weekly', 'semanal ', 'diario '), r.period_key, ', partida #', r.lobby_id),
+           'event'
+    FROM zgaming_web.mix_rewards r
+    WHERE r.lobby_id = p_lobby_id
+      AND r.inventory_item_id IS NULL;
+
+    UPDATE zgaming_web.mix_rewards r
+    JOIN zgaming_web.inventory_items i
+      ON i.accid = r.accid
+     AND i.grant_reason = CONCAT('MIX ', IF(r.kind = 'weekly', 'semanal ', 'diario '), r.period_key, ', partida #', r.lobby_id)
+    SET r.inventory_item_id = i.id
+    WHERE r.lobby_id = p_lobby_id
+      AND r.inventory_item_id IS NULL;
+
+    INSERT INTO zgaming_web.inventory_logs (item_id, accid, action, details, performed_by)
+    SELECT r.inventory_item_id, r.accid, 'granted',
+           JSON_OBJECT('source', 'event', 'reason', 'mix_reward', 'kind', r.kind,
+                       'period', r.period_key, 'lobby_id', r.lobby_id),
+           NULL
+    FROM zgaming_web.mix_rewards r
+    WHERE r.lobby_id = p_lobby_id
+      AND r.inventory_item_id IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM zgaming_web.inventory_logs l
+          WHERE l.item_id = r.inventory_item_id AND l.action = 'granted'
+      );
+
+    INSERT IGNORE INTO zgaming_web.notifications
+        (user_accid, type, title, message, link, notification_key, metadata)
+    SELECT r.accid, 'gift_received',
+           IF(r.kind = 'weekly', 'Premio MIX semanal', 'Premio MIX diario'),
+           IF(r.kind = 'weekly',
+              CONCAT('Ganaste tu primera partida 5v5 de la semana (#', r.lobby_id, '). Recibiste Premium 2 días en tu inventario.'),
+              CONCAT('Ganaste tu primera partida 5v5 del día (#', r.lobby_id, '). Recibiste Gold 1 día transferible en tu inventario.')),
+           '/account/inventory',
+           CONCAT('mix_reward_', r.kind, '_', r.period_key),
+           JSON_OBJECT('lobby_id', r.lobby_id, 'inventory_item_id', r.inventory_item_id)
+    FROM zgaming_web.mix_rewards r
+    WHERE r.lobby_id = p_lobby_id;
 END$$
 
 DROP PROCEDURE IF EXISTS `zgaming_web`.`MixHeartbeat`$$
