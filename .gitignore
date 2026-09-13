@@ -1,0 +1,12 @@
+# Binarios compilados: nunca se versionan
+*.amxx
+*.amxx.*
+
+# Respaldos
+*.bak
+*.bak-*
+*.pre-*
+
+# SQL: solo sql/schema.sql
+*.sql
+!sql/schema.sql

@@ -1,0 +1,26 @@
+[es]
+MIX_DMG_GIVEN = Daño hecho a "%s" - %d en %d impactos
+MIX_DMG_CHAT_TITLE = Daño de la ronda
+MIX_DMG_NONE = No hiciste ni recibiste daño en esta ronda
+MIX_DMG_CHAT_BOTH = ^3%s^1: diste ^4%d^1 (^4%d^1) - recibiste ^4%d^1 (^4%d^1)
+MIX_DMG_CHAT_GIVEN = ^3%s^1: diste ^4%d^1 en ^4%d^1 impactos
+MIX_DMG_CHAT_TAKEN = ^3%s^1: recibiste ^4%d^1 en ^4%d^1 impactos
+MIX_DMG_TAKEN = Daño recibido de "%s" - %d en %d impactos
+
+[en]
+MIX_DMG_GIVEN = Damage Given to "%s" - %d in %d hits
+MIX_DMG_CHAT_TITLE = Round damage
+MIX_DMG_NONE = You dealt and took no damage this round
+MIX_DMG_CHAT_BOTH = ^3%s^1: dealt ^4%d^1 (^4%d^1) - taken ^4%d^1 (^4%d^1)
+MIX_DMG_CHAT_GIVEN = ^3%s^1: dealt ^4%d^1 in ^4%d^1 hits
+MIX_DMG_CHAT_TAKEN = ^3%s^1: taken ^4%d^1 in ^4%d^1 hits
+MIX_DMG_TAKEN = Damage Taken from "%s" - %d in %d hits
+
+[bp]
+MIX_DMG_GIVEN = Dano causado em "%s" - %d em %d acertos
+MIX_DMG_CHAT_TITLE = Dano da rodada
+MIX_DMG_NONE = Voce nao causou nem recebeu dano nesta rodada
+MIX_DMG_CHAT_BOTH = ^3%s^1: causou ^4%d^1 (^4%d^1) - recebeu ^4%d^1 (^4%d^1)
+MIX_DMG_CHAT_GIVEN = ^3%s^1: causou ^4%d^1 em ^4%d^1 acertos
+MIX_DMG_CHAT_TAKEN = ^3%s^1: recebeu ^4%d^1 em ^4%d^1 acertos
+MIX_DMG_TAKEN = Dano recebido de "%s" - %d em %d acertos
