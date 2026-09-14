@@ -122,6 +122,8 @@ enum _:Disconnected_Struct
     Disconnected_Kills,
     Disconnected_Deaths,
     Disconnected_Assists,
+    Disconnected_Frags,
+    Disconnected_ScoreDeaths,
     Disconnected_Money,
     bool:Disconnected_MatchDecided,
     bool:Disconnected_HasWeapons,
@@ -282,6 +284,9 @@ new g_iReconnectWeapons[ MAX_PLAYERS + 1 ][ 32 ];
 new g_iReconnectWeaponClip[ MAX_PLAYERS + 1 ][ 32 ];
 new g_iReconnectWeaponBpAmmo[ MAX_PLAYERS + 1 ][ 32 ];
 new g_iReconnectWeaponCount[ MAX_PLAYERS + 1 ];
+/* Kills y muertes del TAB para devolver al reconectar; -1 = no hay nada que restaurar. */
+new g_iReconnectFrags[ MAX_PLAYERS + 1 ] = { -1, ... };
+new g_iReconnectScoreDeaths[ MAX_PLAYERS + 1 ];
 new bool:g_bReconnectHasDefuser[ MAX_PLAYERS + 1 ];
 
 new Float:g_flSavedBuytime;
@@ -832,6 +837,7 @@ public client_putinserver( iId )
     g_iPauseMoney[ iId ] = 0;
     g_bPauseMoneySaved[ iId ] = false;
     g_iReconnectMoney[ iId ] = 0;
+    g_iReconnectFrags[ iId ] = -1;
     g_bReconnectHasWeapons[ iId ] = false;
     g_iReconnectArmor[ iId ] = 0;
     g_iReconnectArmorType[ iId ] = 0;
@@ -882,6 +888,7 @@ public client_disconnected( iId )
     g_iPauseMoney[ iId ] = 0;
     g_bPauseMoneySaved[ iId ] = false;
     g_iReconnectMoney[ iId ] = 0;
+    g_iReconnectFrags[ iId ] = -1;
     g_bReconnectHasWeapons[ iId ] = false;
     g_iReconnectArmor[ iId ] = 0;
     g_iReconnectArmorType[ iId ] = 0;
@@ -2927,6 +2934,7 @@ ResetMixState( )
         g_iPauseMoney[ iPlayer ] = 0;
         g_bPauseMoneySaved[ iPlayer ] = false;
         g_iReconnectMoney[ iPlayer ] = 0;
+        g_iReconnectFrags[ iPlayer ] = -1;
         g_bReconnectHasWeapons[ iPlayer ] = false;
         g_iReconnectArmor[ iPlayer ] = 0;
         g_iReconnectArmorType[ iPlayer ] = 0;
@@ -3037,6 +3045,9 @@ AddDisconnectedPlayer( const iId )
     g_sDisconnected[ iSlot ][ Disconnected_Kills ] = g_sPlayers[ iId ][ Player_Kills ];
     g_sDisconnected[ iSlot ][ Disconnected_Deaths ] = g_sPlayers[ iId ][ Player_Deaths ];
     g_sDisconnected[ iSlot ][ Disconnected_Assists ] = g_sPlayers[ iId ][ Player_Assists ];
+    // El TAB vive en la entidad del jugador y se pierde al desconectarse.
+    g_sDisconnected[ iSlot ][ Disconnected_Frags ] = floatround( Float:get_entvar( iId, var_frags ) );
+    g_sDisconnected[ iSlot ][ Disconnected_ScoreDeaths ] = get_member( iId, m_iDeaths );
     g_sDisconnected[ iSlot ][ Disconnected_MatchDecided ] = MatchAlreadyDecided( );
     
     copy( g_sDisconnected[ iSlot ][ Disconnected_Name ], charsmax( g_sDisconnected[ ][ Disconnected_Name ] ), g_sPlayers[ iId ][ Player_Name ] );
@@ -3625,6 +3636,10 @@ HandlePlayerReconnect( const iId, const bool:bAfterAbandon = false )
 
     new TeamName:iGameTeam = GetGameTeamForMixTeam( g_sDisconnected[ iSlot ][ Disconnected_Team ] );
     rg_join_team( iId, iGameTeam );
+
+    g_iReconnectFrags[ iId ] = g_sDisconnected[ iSlot ][ Disconnected_Frags ];
+    g_iReconnectScoreDeaths[ iId ] = g_sDisconnected[ iSlot ][ Disconnected_ScoreDeaths ];
+    RestoreScoreboard( iId );
     /* El join nativo puede aplicar temporalmente mp_startmoney antes de que
      * corra el restore diferido. Restaurar aqui evita que el jugador reaparezca
      * con el dinero del warmup, y el task de abajo vuelve a blindar el equipo
@@ -3701,12 +3716,31 @@ SetPlayerReconnectData( const iId, const iMoney, const bool:bHasWeapons, const i
     }
 }
 
+/* Vuelve a poner kills y muertes en el TAB y se lo avisa a todos. Sin esto el
+ * que reconectaba aparecía en 0 aunque sus números siguieran contando para la web. */
+RestoreScoreboard( const iId )
+{
+    if ( g_iReconnectFrags[ iId ] < 0 || !GetPlayerBit( g_iIsConnected, iId ) )
+    {
+        return;
+    }
+
+    set_entvar( iId, var_frags, float( g_iReconnectFrags[ iId ] ) );
+    set_member( iId, m_iDeaths, g_iReconnectScoreDeaths[ iId ] );
+
+    // AddPoints con 0 no cambia nada y manda el ScoreInfo actualizado a todos.
+    ExecuteHamB( Ham_AddPoints, iId, 0, true );
+}
+
 public OnTaskRestorePlayerEquipment( iId )
 {
     if ( !GetPlayerBit( g_iIsConnected, iId ) )
     {
         return;
     }
+
+    // El join y el spawn pueden pisar el TAB: se reafirma antes de soltar los datos.
+    RestoreScoreboard( iId );
 
     rg_add_account( iId, g_iReconnectMoney[ iId ], AS_SET );
     
@@ -3745,6 +3779,7 @@ public OnTaskRestorePlayerEquipment( iId )
     SendRoundTime( iId, iRoundTime );
     
     g_iReconnectMoney[ iId ] = 0;
+    g_iReconnectFrags[ iId ] = -1;
     g_bReconnectHasWeapons[ iId ] = false;
     g_iReconnectArmor[ iId ] = 0;
     g_iReconnectArmorType[ iId ] = 0;
@@ -4819,6 +4854,14 @@ bool:RejoinAbandonedRosterSlot( const iId, const iRosterSlot )
         rg_join_team( iId, GetGameTeamForMixTeam( iMixTeam ) );
         rg_add_account( iId, iSavedMoney, AS_SET );
         NotifyWebPlayerJoined( iId );
+
+        g_sPlayers[ iId ][ Player_Kills ] = g_iWebRosterKills[ iRosterSlot ];
+        g_sPlayers[ iId ][ Player_Deaths ] = g_iWebRosterDeaths[ iRosterSlot ];
+        g_sPlayers[ iId ][ Player_Assists ] = g_iWebRosterAssists[ iRosterSlot ];
+
+        g_iReconnectFrags[ iId ] = g_iWebRosterKills[ iRosterSlot ];
+        g_iReconnectScoreDeaths[ iId ] = g_iWebRosterDeaths[ iRosterSlot ];
+        RestoreScoreboard( iId );
 
         new iNoWeapons[ 32 ];
         SetPlayerReconnectData( iId, iSavedMoney, false, 0, 0, false, iNoWeapons, iNoWeapons, iNoWeapons, 0 );
