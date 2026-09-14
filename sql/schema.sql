@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_lobby_maps` (
   `map` varchar(64) NOT NULL,
   `banned_by` enum('A','B') DEFAULT NULL COMMENT 'NULL = sigue disponible',
   `ban_order` tinyint(3) unsigned DEFAULT NULL COMMENT 'Orden del ban (0..5), para el historial pick/ban',
+  `banned_at` datetime DEFAULT NULL COMMENT 'Cuando se veto, para contarlo en el chat de la sala',
   PRIMARY KEY (`lobby_id`,`map`),
   CONSTRAINT `fk_mix_lobby_maps_lobby` FOREIGN KEY (`lobby_id`) REFERENCES `mix_lobbies` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_lobby_players` (
   `is_captain` tinyint(1) NOT NULL DEFAULT 0,
   `is_sub` tinyint(1) NOT NULL DEFAULT 0,
   `pick_order` tinyint(3) unsigned DEFAULT NULL COMMENT 'En que turno del draft fue elegido (NULL para capitanes)',
+  `picked_at` datetime DEFAULT NULL COMMENT 'Cuando fue elegido, para contarlo en el chat de la sala',
   `kills` smallint(5) unsigned NOT NULL DEFAULT 0,
   `deaths` smallint(5) unsigned NOT NULL DEFAULT 0,
   `assists` smallint(5) unsigned NOT NULL DEFAULT 0,
@@ -121,6 +123,9 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_lobby_players` (
   KEY `idx_accid` (`accid`),
   CONSTRAINT `fk_mix_lobby_players_lobby` FOREIGN KEY (`lobby_id`) REFERENCES `mix_lobbies` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+-- Bases creadas antes de que existieran estas columnas.
+ALTER TABLE `zgaming_web`.`mix_lobby_maps` ADD COLUMN IF NOT EXISTS `banned_at` datetime DEFAULT NULL COMMENT 'Cuando se veto, para contarlo en el chat de la sala' AFTER `ban_order`;
+ALTER TABLE `zgaming_web`.`mix_lobby_players` ADD COLUMN IF NOT EXISTS `picked_at` datetime DEFAULT NULL COMMENT 'Cuando fue elegido, para contarlo en el chat de la sala' AFTER `pick_order`;
 CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_no_shows` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `accid` int(11) NOT NULL,
