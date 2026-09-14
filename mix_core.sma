@@ -214,6 +214,8 @@ new g_iWebRoundFlashes[ MAX_PLAYERS + 1 ];
 new g_iWebRoundPlants[ MAX_PLAYERS + 1 ];
 new g_iWebRoundDefuses[ MAX_PLAYERS + 1 ];
 new bool:g_bWebLastHitHe[ MAX_PLAYERS + 1 ];
+/* El golpe que mató ya se sumó en OnPlayerKilled_Pre: el post de ese daño no lo repite. */
+new bool:g_bFatalHitCounted[ MAX_PLAYERS + 1 ];
 
 new Float:g_flWebRoundStart;
 new g_iWebRoundMoneyA;
@@ -326,6 +328,7 @@ public plugin_init( )
     register_dictionary( "mix_core.txt" );
 
     RegisterHam( Ham_Spawn, "player", "OnPlayerSpawn_Post", true );
+    RegisterHam( Ham_Killed, "player", "OnPlayerKilled_Pre", false );
     RegisterHam( Ham_Killed, "player", "OnPlayerKilled_Post", true );
     RegisterHam( Ham_TakeDamage, "player", "OnPlayerTakeDamage_Post", true );
     RegisterHam( Ham_TakeDamage, "player", "OnPlayerTakeDamage_Pre", false );
@@ -1201,6 +1204,10 @@ public OnPlayerTakeDamage_Pre( const iVictim, const iInflictor, const iAttacker,
     if ( iVictim >= 1 && iVictim <= MaxClients )
     {
         pev( iVictim, pev_health, g_flHealthBeforeHit[ iVictim ] );
+
+        // Se marca antes del golpe: si mata, la baja se anota antes del post.
+        g_bWebLastHitHe[ iVictim ] = ( iDamageBits & DMG_GRENADE ) != 0;
+        g_bFatalHitCounted[ iVictim ] = false;
     }
 
     return HAM_IGNORED;
@@ -1208,6 +1215,13 @@ public OnPlayerTakeDamage_Pre( const iVictim, const iInflictor, const iAttacker,
 
 public OnPlayerTakeDamage_Post( const iVictim, const iInflictor, const iAttacker, Float:flDamage, const iDamageBits )
 {
+    if ( iVictim >= 1 && iVictim <= MaxClients && g_bFatalHitCounted[ iVictim ] )
+    {
+        g_bFatalHitCounted[ iVictim ] = false;
+
+        return;
+    }
+
     if ( g_iMixStatus != MIX_LIVE && g_iMixStatus != MIX_OVERTIME )
     {
         return;
@@ -1252,8 +1266,6 @@ public OnPlayerTakeDamage_Post( const iVictim, const iInflictor, const iAttacker
 
     g_iRoundDamage[ iAttacker ][ iVictim ] += iApplied;
     g_iRoundHits[ iAttacker ][ iVictim ]++;
-
-    g_bWebLastHitHe[ iVictim ] = ( iDamageBits & DMG_GRENADE ) != 0;
 
     if ( g_bWebLastHitHe[ iVictim ] )
     {
@@ -1355,35 +1367,74 @@ ResetRoundDamage( )
     }
 }
 
+/* La baja se cuenta en el PRE y no en el POST.
+ *
+ * Dentro de Killed el motor revisa si la ronda terminó: la última baja de la
+ * partida (o del primer tiempo) dispara ahí mismo RoundEnd, FinishMatch y el
+ * reporte a la web. Para cuando corría el POST el estado ya no era LIVE y esa
+ * baja, su muerte, el headshot, la asistencia y el daño del golpe final se
+ * perdían: el scoreboard marcaba 52 y la web 51. */
+public OnPlayerKilled_Pre( const iVictim, const iAttacker, const iGib )
+{
+    if ( g_iMixStatus != MIX_LIVE && g_iMixStatus != MIX_OVERTIME )
+    {
+        return HAM_IGNORED;
+    }
+
+    if ( iVictim < 1 || iVictim > MaxClients )
+    {
+        return HAM_IGNORED;
+    }
+
+    if ( GetPlayerBit( g_iIsConnected, iVictim ) )
+    {
+        g_sPlayers[ iVictim ][ Player_Deaths ]++;
+        AddWebStat( iVictim, WEB_STAT_DEATH );
+    }
+
+    if ( iAttacker >= 1 && iAttacker <= MaxClients
+        && GetPlayerBit( g_iIsConnected, iAttacker )
+        && iVictim != iAttacker
+        && g_sPlayers[ iAttacker ][ Player_Team ] != MIX_TEAM_NONE
+        && g_sPlayers[ iAttacker ][ Player_Team ] != g_sPlayers[ iVictim ][ Player_Team ] )
+    {
+        g_sPlayers[ iAttacker ][ Player_Kills ]++;
+
+        AddWebStat( iAttacker, WEB_STAT_KILL );
+
+        if ( get_member( iVictim, m_LastHitGroup ) == HIT_HEAD )
+        {
+            AddWebStat( iAttacker, WEB_STAT_HEADSHOT );
+        }
+
+        /* El golpe que lo mató: la vida que tenía antes es el daño aplicado.
+         * Se suma acá porque el POST de ese daño llega recién después. */
+        new iApplied = max( 0, floatround( g_flHealthBeforeHit[ iVictim ] ) );
+
+        g_iDamageDealt[ iVictim ][ iAttacker ] += iApplied;
+        g_iRoundDamage[ iAttacker ][ iVictim ] += iApplied;
+        g_iRoundHits[ iAttacker ][ iVictim ]++;
+
+        if ( g_bWebLastHitHe[ iVictim ] )
+        {
+            g_iWebRoundHeDamage[ iAttacker ] += iApplied;
+        }
+
+        AddWebDamage( iAttacker, iApplied );
+        g_bFatalHitCounted[ iVictim ] = true;
+
+        AwardAssists( iVictim, iAttacker );
+
+        LogWebKill( iVictim, iAttacker );
+    }
+
+    return HAM_IGNORED;
+}
+
 public OnPlayerKilled_Post( const iVictim, const iAttacker, const iGib )
 {
     if ( g_iMixStatus == MIX_LIVE || g_iMixStatus == MIX_OVERTIME )
     {
-        if ( GetPlayerBit( g_iIsConnected, iVictim ) )
-        {
-            g_sPlayers[ iVictim ][ Player_Deaths ]++;
-            AddWebStat( iVictim, WEB_STAT_DEATH );
-        }
-
-        if ( GetPlayerBit( g_iIsConnected, iAttacker )
-            && iVictim != iAttacker
-            && g_sPlayers[ iAttacker ][ Player_Team ] != MIX_TEAM_NONE
-            && g_sPlayers[ iAttacker ][ Player_Team ] != g_sPlayers[ iVictim ][ Player_Team ] )
-        {
-            g_sPlayers[ iAttacker ][ Player_Kills ]++;
-
-            AddWebStat( iAttacker, WEB_STAT_KILL );
-
-            if ( get_member( iVictim, m_LastHitGroup ) == HIT_HEAD )
-            {
-                AddWebStat( iAttacker, WEB_STAT_HEADSHOT );
-            }
-
-            AwardAssists( iVictim, iAttacker );
-
-            LogWebKill( iVictim, iAttacker );
-        }
-
         remove_task( TASK_SHOW_ROUND_DAMAGE + iVictim );
         set_task( 0.1, "OnTaskShowRoundDamage", TASK_SHOW_ROUND_DAMAGE + iVictim );
 
