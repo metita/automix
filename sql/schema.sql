@@ -149,10 +149,17 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_penalties` (
   `decline_last_strike_at` datetime DEFAULT NULL,
   `decline_banned_until` datetime DEFAULT NULL,
   `total_declines` int(11) NOT NULL DEFAULT 0,
+  `manual_banned_until` datetime DEFAULT NULL COMMENT 'Bloqueo puesto a mano por Core',
+  `manual_reason` varchar(200) DEFAULT NULL,
+  `manual_by` int(11) DEFAULT NULL COMMENT 'accid de Core que lo puso',
   PRIMARY KEY (`accid`),
   KEY `idx_banned_until` (`banned_until`),
   KEY `idx_decline_banned_until` (`decline_banned_until`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+-- Bases creadas antes del bloqueo manual.
+ALTER TABLE `zgaming_web`.`mix_penalties` ADD COLUMN IF NOT EXISTS `manual_banned_until` datetime DEFAULT NULL COMMENT 'Bloqueo puesto a mano por Core' AFTER `total_declines`;
+ALTER TABLE `zgaming_web`.`mix_penalties` ADD COLUMN IF NOT EXISTS `manual_reason` varchar(200) DEFAULT NULL AFTER `manual_banned_until`;
+ALTER TABLE `zgaming_web`.`mix_penalties` ADD COLUMN IF NOT EXISTS `manual_by` int(11) DEFAULT NULL COMMENT 'accid de Core que lo puso' AFTER `manual_reason`;
 CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_queue` (
   `accid` int(11) NOT NULL COMMENT 'Cuenta del jugador (accsys)',
   `mode` enum('5v5','2v2') NOT NULL DEFAULT '5v5',
@@ -179,6 +186,89 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_rewards` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_mix_rewards_period` (`accid`,`kind`,`period_key`),
   KEY `idx_mix_rewards_lobby` (`lobby_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Cada rechazo de la confirmacion, para el historial de sanciones. Antes solo
+-- habia contadores y Core no podia ver cuando fue cada uno.
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_declines` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `accid` int(11) NOT NULL,
+  `mode` enum('5v5','2v2') NOT NULL DEFAULT '5v5',
+  `strike` tinyint(3) unsigned NOT NULL COMMENT 'Que numero de rechazo era en ese momento',
+  `penalty_seconds` int(11) NOT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_mix_declines_accid` (`accid`,`created_at`),
+  KEY `idx_mix_declines_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Bloqueos puestos a mano por Core, con motivo. El vigente vive en
+-- mix_penalties.manual_banned_until; esto queda como historial.
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_manual_blocks` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `accid` int(11) NOT NULL,
+  `seconds` int(11) NOT NULL,
+  `reason` varchar(200) NOT NULL,
+  `core_accid` int(11) NOT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_mix_manual_blocks_accid` (`accid`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Estadisticas detalladas: una fila por ronda que manda el servidor.
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_match_rounds` (
+  `lobby_id` int(11) NOT NULL,
+  `round` smallint(5) unsigned NOT NULL COMMENT 'Suma del marcador al terminar la ronda',
+  `half` tinyint(3) unsigned NOT NULL COMMENT '1, 2, 3+ = overtime',
+  `winner` enum('A','B') NOT NULL,
+  `reason` enum('eliminacion','bomba','desactivacion','tiempo','otro') NOT NULL DEFAULT 'otro',
+  `side_a` enum('T','CT') NOT NULL COMMENT 'Lado del equipo A en esa ronda',
+  `score_a` smallint(5) unsigned NOT NULL,
+  `score_b` smallint(5) unsigned NOT NULL,
+  `money_a` int(11) NOT NULL DEFAULT 0 COMMENT 'Plata del equipo A al terminar el freezetime',
+  `money_b` int(11) NOT NULL DEFAULT 0,
+  `alive_a` tinyint(3) unsigned NOT NULL DEFAULT 0 COMMENT 'Vivos del equipo A al terminar',
+  `alive_b` tinyint(3) unsigned NOT NULL DEFAULT 0,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`lobby_id`,`round`),
+  CONSTRAINT `fk_mix_match_rounds_lobby` FOREIGN KEY (`lobby_id`) REFERENCES `mix_lobbies` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_match_kills` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `lobby_id` int(11) NOT NULL,
+  `round` smallint(5) unsigned NOT NULL,
+  `second` smallint(5) unsigned NOT NULL COMMENT 'Desde que termino el freezetime',
+  `attacker` int(11) NOT NULL,
+  `victim` int(11) NOT NULL,
+  `weapon` varchar(24) NOT NULL,
+  `headshot` tinyint(1) NOT NULL DEFAULT 0,
+  `assister` int(11) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_mix_match_kills_round` (`lobby_id`,`round`),
+  CONSTRAINT `fk_mix_match_kills_lobby` FOREIGN KEY (`lobby_id`) REFERENCES `mix_lobbies` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_match_damage` (
+  `lobby_id` int(11) NOT NULL,
+  `round` smallint(5) unsigned NOT NULL,
+  `attacker` int(11) NOT NULL,
+  `victim` int(11) NOT NULL,
+  `damage` smallint(5) unsigned NOT NULL,
+  PRIMARY KEY (`lobby_id`,`round`,`attacker`,`victim`),
+  CONSTRAINT `fk_mix_match_damage_lobby` FOREIGN KEY (`lobby_id`) REFERENCES `mix_lobbies` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_match_utility` (
+  `lobby_id` int(11) NOT NULL,
+  `round` smallint(5) unsigned NOT NULL,
+  `accid` int(11) NOT NULL,
+  `he_damage` smallint(5) unsigned NOT NULL DEFAULT 0,
+  `flashes` tinyint(3) unsigned NOT NULL DEFAULT 0,
+  `plants` tinyint(3) unsigned NOT NULL DEFAULT 0,
+  `defuses` tinyint(3) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`lobby_id`,`round`,`accid`),
+  CONSTRAINT `fk_mix_match_utility_lobby` FOREIGN KEY (`lobby_id`) REFERENCES `mix_lobbies` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;
@@ -953,6 +1043,97 @@ BEGIN
     UPDATE zgaming_web.mix_lobby_players
     SET connected_at = NOW()
     WHERE lobby_id = p_lobby_id AND accid = p_accid AND connected_at IS NULL;
+END$$
+
+DROP PROCEDURE IF EXISTS `zgaming_web`.`MixRecordRound`$$
+-- Guarda el detalle de una ronda. Idempotente: si el servidor la reenvia, la
+-- reemplaza entera. No devuelve result sets y un JSON invalido solo deja la
+-- ronda sin bajas, daño ni utilidad.
+CREATE PROCEDURE `zgaming_web`.`MixRecordRound`(
+    IN p_lobby_id INT,
+    IN p_round INT,
+    IN p_half INT,
+    IN p_winner VARCHAR(1),
+    IN p_reason VARCHAR(16),
+    IN p_side_a VARCHAR(2),
+    IN p_score_a INT,
+    IN p_score_b INT,
+    IN p_data LONGTEXT
+)
+proc: BEGIN
+    DECLARE v_data LONGTEXT;
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    IF p_round IS NULL OR p_round <= 0 OR p_winner NOT IN ('A', 'B')
+        OR NOT EXISTS (SELECT 1 FROM zgaming_web.mix_lobbies WHERE id = p_lobby_id) THEN
+        LEAVE proc;
+    END IF;
+
+    SET v_data = IF(p_data IS NOT NULL AND JSON_VALID(p_data), p_data, '{}');
+
+    START TRANSACTION;
+
+    INSERT INTO zgaming_web.mix_match_rounds
+        (lobby_id, round, half, winner, reason, side_a, score_a, score_b, money_a, money_b, alive_a, alive_b)
+    VALUES
+        (p_lobby_id, p_round, GREATEST(COALESCE(p_half, 1), 1), p_winner,
+         IF(p_reason IN ('eliminacion', 'bomba', 'desactivacion', 'tiempo'), p_reason, 'otro'),
+         IF(p_side_a = 'CT', 'CT', 'T'),
+         GREATEST(COALESCE(p_score_a, 0), 0), GREATEST(COALESCE(p_score_b, 0), 0),
+         COALESCE(JSON_VALUE(v_data, '$.ma'), 0), COALESCE(JSON_VALUE(v_data, '$.mb'), 0),
+         COALESCE(JSON_VALUE(v_data, '$.va'), 0), COALESCE(JSON_VALUE(v_data, '$.vb'), 0))
+    ON DUPLICATE KEY UPDATE
+        half = VALUES(half), winner = VALUES(winner), reason = VALUES(reason), side_a = VALUES(side_a),
+        score_a = VALUES(score_a), score_b = VALUES(score_b), money_a = VALUES(money_a),
+        money_b = VALUES(money_b), alive_a = VALUES(alive_a), alive_b = VALUES(alive_b);
+
+    DELETE FROM zgaming_web.mix_match_kills WHERE lobby_id = p_lobby_id AND round = p_round;
+    DELETE FROM zgaming_web.mix_match_damage WHERE lobby_id = p_lobby_id AND round = p_round;
+    DELETE FROM zgaming_web.mix_match_utility WHERE lobby_id = p_lobby_id AND round = p_round;
+
+    INSERT INTO zgaming_web.mix_match_kills
+        (lobby_id, round, second, attacker, victim, weapon, headshot, assister)
+    SELECT p_lobby_id, p_round, GREATEST(COALESCE(k.sec, 0), 0), k.attacker, k.victim,
+           LEFT(COALESCE(k.weapon, 'otro'), 24), IF(k.hs = 1, 1, 0), NULLIF(k.assister, 0)
+    FROM JSON_TABLE(v_data, '$.k[*]' COLUMNS(
+        sec      INT PATH '$[0]',
+        attacker INT PATH '$[1]',
+        victim   INT PATH '$[2]',
+        weapon   VARCHAR(32) PATH '$[3]',
+        hs       INT PATH '$[4]',
+        assister INT PATH '$[5]'
+    )) k
+    WHERE k.attacker > 0 AND k.victim > 0;
+
+    INSERT INTO zgaming_web.mix_match_damage (lobby_id, round, attacker, victim, damage)
+    SELECT p_lobby_id, p_round, d.attacker, d.victim, LEAST(SUM(d.damage), 65535)
+    FROM JSON_TABLE(v_data, '$.d[*]' COLUMNS(
+        attacker INT PATH '$[0]',
+        victim   INT PATH '$[1]',
+        damage   INT PATH '$[2]'
+    )) d
+    WHERE d.attacker > 0 AND d.victim > 0 AND d.attacker <> d.victim AND d.damage > 0
+    GROUP BY d.attacker, d.victim;
+
+    INSERT INTO zgaming_web.mix_match_utility (lobby_id, round, accid, he_damage, flashes, plants, defuses)
+    SELECT p_lobby_id, p_round, u.accid, LEAST(SUM(u.he), 65535), LEAST(SUM(u.fl), 255),
+           LEAST(SUM(u.pl), 255), LEAST(SUM(u.de), 255)
+    FROM JSON_TABLE(v_data, '$.u[*]' COLUMNS(
+        accid INT PATH '$[0]',
+        he    INT PATH '$[1]',
+        fl    INT PATH '$[2]',
+        pl    INT PATH '$[3]',
+        de    INT PATH '$[4]'
+    )) u
+    WHERE u.accid > 0
+    GROUP BY u.accid;
+
+    COMMIT;
 END$$
 
 DROP PROCEDURE IF EXISTS `zgaming_web`.`MixReplacePlayer`$$

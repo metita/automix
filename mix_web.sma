@@ -72,6 +72,7 @@ new const g_szQueryPlayerConnected[ ] = "CALL zgaming_web.MixPlayerConnected(?, 
 new const g_szQueryPlayerAbandoned[ ] = "CALL zgaming_web.MixPlayerAbandoned(?, ?)";
 new const g_szQueryReplacePlayer[ ]   = "CALL zgaming_web.MixReplacePlayerWithStats(?, ?, ?, ?)";
 new const g_szQueryHeartbeat[ ]       = "CALL zgaming_web.MixHeartbeat(?)";
+new const g_szQueryRecordRound[ ]     = "CALL zgaming_web.MixRecordRound(?, ?, ?, ?, ?, ?, ?, ?, ?)";
 new const g_szQueryTeamElo[ ]         = "SELECT p.lobby_id, COALESCE(AVG(CASE WHEN p.team = 'A' THEN COALESCE(e.elo, 1000) END), 1000), COALESCE(AVG(CASE WHEN p.team = 'B' THEN COALESCE(e.elo, 1000) END), 1000) FROM zgaming_web.mix_lobby_players p INNER JOIN zgaming_web.mix_lobbies l ON l.id = p.lobby_id LEFT JOIN zgaming_web.mix_elo e ON e.accid = p.accid AND e.mode = l.mode WHERE p.lobby_id = ? AND p.team IS NOT NULL GROUP BY p.lobby_id";
 
 new AccSysDb:g_hDatabase = Invalid_AccSysDb;
@@ -1124,6 +1125,36 @@ public Query_UpdateScore( bool:bSuccess, mariadb_result:hQuery, JSON:jObject )
     if ( !bSuccess )
     {
         log_amx( "[%s] Fallo al actualizar el marcador de la partida #%d.", g_szPrefix, g_iLobbyId );
+    }
+}
+
+/* El detalle de cada ronda para las estadisticas de la web. Si la base no lo
+ * toma, la partida sigue igual: solo queda sin ese detalle. */
+public mix_web_round_ended( const iRound, const iHalf, const iWinner, const szReason[ ], const szSideA[ ], const iScoreA, const iScoreB, const szData[ ] )
+{
+    if ( !g_iLobbyId || iRound <= 0 )
+    {
+        return;
+    }
+
+    DB_StmtBindInt( 0, g_iLobbyId );
+    DB_StmtBindInt( 1, iRound );
+    DB_StmtBindInt( 2, iHalf );
+    DB_StmtBindString( 3, ( iWinner == MIX_TEAM_A ) ? "A" : "B" );
+    DB_StmtBindString( 4, szReason );
+    DB_StmtBindString( 5, szSideA );
+    DB_StmtBindInt( 6, iScoreA );
+    DB_StmtBindInt( 7, iScoreB );
+    DB_StmtBindString( 8, szData );
+
+    DB_ThreadStmt( g_hDatabase, Invalid_JSON, "Query_RecordRound", "mix_web_round_ended", g_szQueryRecordRound );
+}
+
+public Query_RecordRound( bool:bSuccess, mariadb_result:hQuery, JSON:jObject )
+{
+    if ( !bSuccess )
+    {
+        log_amx( "[%s] Fallo al guardar el detalle de una ronda de la partida #%d.", g_szPrefix, g_iLobbyId );
     }
 }
 

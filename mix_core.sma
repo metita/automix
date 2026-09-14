@@ -190,6 +190,46 @@ new g_iFwdWebMatchCancel = -1;
 new g_iFwdWebPlayerLeft = -1;
 new g_iFwdWebPlayerReplaced = -1;
 new g_iFwdWebPlayerJoined = -1;
+new g_iFwdWebRound = -1;
+
+/* Registro de la ronda para las estadisticas detalladas de la web.
+ *
+ * Se arma mientras se juega y se entrega entero cuando la ronda termina de
+ * verdad (en el restart siguiente, o al cerrar la partida): asi entran tambien
+ * las bajas de despues del final de ronda, que el marcador ya cuenta. Nada de
+ * esto decide nada del partido; si se pierde, solo falta el detalle en la web. */
+#define WEB_ROUND_MAX_KILLS 64
+#define WEB_ROUND_DATA_LEN  4096
+
+new g_iWebKillCount;
+new g_iWebKillSecond[ WEB_ROUND_MAX_KILLS ];
+new g_iWebKillAttacker[ WEB_ROUND_MAX_KILLS ];
+new g_iWebKillVictim[ WEB_ROUND_MAX_KILLS ];
+new g_iWebKillAssister[ WEB_ROUND_MAX_KILLS ];
+new bool:g_bWebKillHeadshot[ WEB_ROUND_MAX_KILLS ];
+new g_szWebKillWeapon[ WEB_ROUND_MAX_KILLS ][ 16 ];
+
+new g_iWebRoundHeDamage[ MAX_PLAYERS + 1 ];
+new g_iWebRoundFlashes[ MAX_PLAYERS + 1 ];
+new g_iWebRoundPlants[ MAX_PLAYERS + 1 ];
+new g_iWebRoundDefuses[ MAX_PLAYERS + 1 ];
+new bool:g_bWebLastHitHe[ MAX_PLAYERS + 1 ];
+
+new Float:g_flWebRoundStart;
+new g_iWebRoundMoneyA;
+new g_iWebRoundMoneyB;
+
+new bool:g_bWebRoundPending;
+new g_iWebPendingRound;
+new g_iWebPendingHalf;
+new g_iWebPendingWinner;
+new g_iWebPendingScoreA;
+new g_iWebPendingScoreB;
+new g_iWebPendingAliveA;
+new g_iWebPendingAliveB;
+new g_szWebPendingReason[ 16 ];
+new g_szWebPendingSideA[ 4 ];
+new g_szWebRoundData[ WEB_ROUND_DATA_LEN ];
 
 new g_sPlayers[ MAX_PLAYERS + 1 ][ Player_Struct ];
 new g_sMatch[ Match_Struct ];
@@ -303,6 +343,10 @@ public plugin_init( )
     RegisterHookChain( RG_CSGameRules_OnRoundFreezeEnd, "OnRoundFreezeEnd_Pre", false );
     RegisterHookChain( RG_CSGameRules_CheckWinConditions, "OnCheckWinConditions_Pre", false );
 
+    RegisterHookChain( RG_ThrowFlashbang, "OnWebThrowFlashbang_Post", true );
+    RegisterHookChain( RG_PlantBomb, "OnWebPlantBomb_Post", true );
+    RegisterHookChain( RG_CGrenade_DefuseBombEnd, "OnWebDefuseBombEnd_Post", true );
+
     register_clcmd( "say",                  "ClientCommand_Say" );
     register_clcmd( "say_team",             "ClientCommand_SayTeam" );
 
@@ -345,6 +389,7 @@ public plugin_cfg( )
     g_iFwdWebPlayerJoined = CreateMultiForward( "mix_web_player_joined", ET_IGNORE, FP_CELL );
     g_iFwdWebScore        = CreateMultiForward( "mix_web_score_changed", ET_IGNORE, FP_CELL, FP_CELL, FP_CELL );
     g_iFwdWebMatchCancel  = CreateMultiForward( "mix_web_match_cancelled", ET_IGNORE );
+    g_iFwdWebRound        = CreateMultiForward( "mix_web_round_ended", ET_IGNORE, FP_CELL, FP_CELL, FP_CELL, FP_STRING, FP_STRING, FP_CELL, FP_CELL, FP_STRING );
 
     set_cvar_num( "mp_give_c4_frags", 0 );
 }
@@ -464,6 +509,271 @@ ClearDamageOn( const iVictim )
     for ( new iPlayer = 0; iPlayer <= MaxClients; iPlayer++ )
     {
         g_iDamageDealt[ iVictim ][ iPlayer ] = 0;
+    }
+}
+
+/* =================================================================================
+* 				[ Web Round Log ]
+* ================================================================================= */
+
+bool:IsWebRoundLogging( )
+{
+    return IsWebMatch( ) && ( g_iMixStatus == MIX_LIVE || g_iMixStatus == MIX_OVERTIME );
+}
+
+ResetWebRoundLog( )
+{
+    g_iWebKillCount = 0;
+
+    for ( new i = 0; i <= MAX_PLAYERS; i++ )
+    {
+        g_iWebRoundHeDamage[ i ] = 0;
+        g_iWebRoundFlashes[ i ] = 0;
+        g_iWebRoundPlants[ i ] = 0;
+        g_iWebRoundDefuses[ i ] = 0;
+        g_bWebLastHitHe[ i ] = false;
+    }
+}
+
+LogWebKill( const iVictim, const iKiller )
+{
+    if ( !IsWebRoundLogging( ) || g_iWebKillCount >= WEB_ROUND_MAX_KILLS )
+    {
+        return;
+    }
+
+    new iKillerAccId = g_sPlayers[ iKiller ][ Player_AccId ];
+    new iVictimAccId = g_sPlayers[ iVictim ][ Player_AccId ];
+
+    if ( iKillerAccId <= 0 || iVictimAccId <= 0 )
+    {
+        return;
+    }
+
+    /* La asistencia que se muestra es la del que mas daño le hizo, fuera del
+     * que lo mato. El marcador sigue sumando a todos los que dañaron. */
+    new iAssister = 0;
+    new iBestDamage = 0;
+
+    for ( new iPlayer = 1; iPlayer <= MaxClients; iPlayer++ )
+    {
+        if ( iPlayer == iKiller || iPlayer == iVictim || g_iDamageDealt[ iVictim ][ iPlayer ] <= iBestDamage )
+        {
+            continue;
+        }
+
+        iBestDamage = g_iDamageDealt[ iVictim ][ iPlayer ];
+        iAssister = g_sPlayers[ iPlayer ][ Player_AccId ];
+    }
+
+    new iEntry = g_iWebKillCount++;
+
+    g_iWebKillSecond[ iEntry ] = max( 0, floatround( get_gametime( ) - g_flWebRoundStart, floatround_floor ) );
+    g_iWebKillAttacker[ iEntry ] = iKillerAccId;
+    g_iWebKillVictim[ iEntry ] = iVictimAccId;
+    g_iWebKillAssister[ iEntry ] = max( 0, iAssister );
+    g_bWebKillHeadshot[ iEntry ] = ( get_member( iVictim, m_LastHitGroup ) == HIT_HEAD );
+
+    if ( g_bWebLastHitHe[ iVictim ] )
+    {
+        copy( g_szWebKillWeapon[ iEntry ], charsmax( g_szWebKillWeapon[ ] ), "hegrenade" );
+    }
+    else
+    {
+        new iItem = get_member( iKiller, m_pActiveItem );
+        new szClass[ 32 ];
+
+        if ( iItem > 0 && is_entity( iItem ) )
+        {
+            get_entvar( iItem, var_classname, szClass, charsmax( szClass ) );
+        }
+
+        if ( equal( szClass, "weapon_", 7 ) )
+        {
+            copy( g_szWebKillWeapon[ iEntry ], charsmax( g_szWebKillWeapon[ ] ), szClass[ 7 ] );
+        }
+        else
+        {
+            copy( g_szWebKillWeapon[ iEntry ], charsmax( g_szWebKillWeapon[ ] ), "otro" );
+        }
+    }
+}
+
+/* Agrega texto al registro solo si entra completo: un JSON cortado a la mitad
+ * se descartaria entero en la base. */
+bool:AppendWebRoundData( &iLen, const szPart[ ] )
+{
+    new iPartLen = strlen( szPart );
+
+    if ( iLen + iPartLen >= WEB_ROUND_DATA_LEN - 8 )
+    {
+        return false;
+    }
+
+    iLen += copy( g_szWebRoundData[ iLen ], WEB_ROUND_DATA_LEN - 1 - iLen, szPart );
+
+    return true;
+}
+
+MarkWebRoundEnded( const iWinnerTeam, const ScenarioEventEndRound:iEvent )
+{
+    if ( !IsWebMatch( ) )
+    {
+        return;
+    }
+
+    g_bWebRoundPending = true;
+    g_iWebPendingRound = g_sMatch[ Match_ScoreA ] + g_sMatch[ Match_ScoreB ];
+    g_iWebPendingWinner = iWinnerTeam;
+    g_iWebPendingScoreA = g_sMatch[ Match_ScoreA ];
+    g_iWebPendingScoreB = g_sMatch[ Match_ScoreB ];
+    g_iWebPendingHalf = ( g_sMatch[ Match_Overtime ] > 0 ) ? 2 + g_sMatch[ Match_Overtime ] : g_sMatch[ Match_Half ];
+
+    switch ( iEvent )
+    {
+        case ROUND_TARGET_BOMB:    copy( g_szWebPendingReason, charsmax( g_szWebPendingReason ), "bomba" );
+        case ROUND_BOMB_DEFUSED:   copy( g_szWebPendingReason, charsmax( g_szWebPendingReason ), "desactivacion" );
+        case ROUND_TARGET_SAVED:   copy( g_szWebPendingReason, charsmax( g_szWebPendingReason ), "tiempo" );
+        case ROUND_CTS_WIN, ROUND_TERRORISTS_WIN: copy( g_szWebPendingReason, charsmax( g_szWebPendingReason ), "eliminacion" );
+        default:                   copy( g_szWebPendingReason, charsmax( g_szWebPendingReason ), "otro" );
+    }
+
+    copy( g_szWebPendingSideA, charsmax( g_szWebPendingSideA ),
+        ( GetGameTeamForMixTeam( MIX_TEAM_A ) == TEAM_TERRORIST ) ? "T" : "CT" );
+
+    g_iWebPendingAliveA = 0;
+    g_iWebPendingAliveB = 0;
+
+    for ( new iPlayer = 1; iPlayer <= MaxClients; iPlayer++ )
+    {
+        if ( !GetPlayerBit( g_iIsConnected, iPlayer ) || !is_user_alive( iPlayer ) )
+        {
+            continue;
+        }
+
+        switch ( g_sPlayers[ iPlayer ][ Player_Team ] )
+        {
+            case MIX_TEAM_A: g_iWebPendingAliveA++;
+            case MIX_TEAM_B: g_iWebPendingAliveB++;
+        }
+    }
+}
+
+FlushWebRound( )
+{
+    if ( !g_bWebRoundPending )
+    {
+        return;
+    }
+
+    g_bWebRoundPending = false;
+
+    new iLen = 0;
+    new szPart[ 96 ];
+
+    formatex( szPart, charsmax( szPart ), "{^"ma^":%d,^"mb^":%d,^"va^":%d,^"vb^":%d,^"k^":[",
+        g_iWebRoundMoneyA, g_iWebRoundMoneyB, g_iWebPendingAliveA, g_iWebPendingAliveB );
+    AppendWebRoundData( iLen, szPart );
+
+    for ( new i = 0; i < g_iWebKillCount; i++ )
+    {
+        formatex( szPart, charsmax( szPart ), "%s[%d,%d,%d,^"%s^",%d,%d]", i ? "," : "",
+            g_iWebKillSecond[ i ], g_iWebKillAttacker[ i ], g_iWebKillVictim[ i ],
+            g_szWebKillWeapon[ i ], g_bWebKillHeadshot[ i ] ? 1 : 0, g_iWebKillAssister[ i ] );
+
+        if ( !AppendWebRoundData( iLen, szPart ) )
+        {
+            break;
+        }
+    }
+
+    AppendWebRoundData( iLen, "],^"d^":[" );
+
+    new bool:bFirst = true;
+
+    for ( new iAttacker = 1; iAttacker <= MaxClients; iAttacker++ )
+    {
+        new iAttackerAccId = g_sPlayers[ iAttacker ][ Player_AccId ];
+
+        if ( iAttackerAccId <= 0 )
+        {
+            continue;
+        }
+
+        for ( new iVictim = 1; iVictim <= MaxClients; iVictim++ )
+        {
+            new iVictimAccId = g_sPlayers[ iVictim ][ Player_AccId ];
+
+            if ( iVictim == iAttacker || iVictimAccId <= 0 || g_iRoundDamage[ iAttacker ][ iVictim ] <= 0 )
+            {
+                continue;
+            }
+
+            formatex( szPart, charsmax( szPart ), "%s[%d,%d,%d]", bFirst ? "" : ",",
+                iAttackerAccId, iVictimAccId, g_iRoundDamage[ iAttacker ][ iVictim ] );
+
+            if ( AppendWebRoundData( iLen, szPart ) )
+            {
+                bFirst = false;
+            }
+        }
+    }
+
+    AppendWebRoundData( iLen, "],^"u^":[" );
+
+    bFirst = true;
+
+    for ( new iPlayer = 1; iPlayer <= MaxClients; iPlayer++ )
+    {
+        new iAccId = g_sPlayers[ iPlayer ][ Player_AccId ];
+
+        if ( iAccId <= 0 || ( !g_iWebRoundHeDamage[ iPlayer ] && !g_iWebRoundFlashes[ iPlayer ]
+            && !g_iWebRoundPlants[ iPlayer ] && !g_iWebRoundDefuses[ iPlayer ] ) )
+        {
+            continue;
+        }
+
+        formatex( szPart, charsmax( szPart ), "%s[%d,%d,%d,%d,%d]", bFirst ? "" : ",", iAccId,
+            g_iWebRoundHeDamage[ iPlayer ], g_iWebRoundFlashes[ iPlayer ],
+            g_iWebRoundPlants[ iPlayer ], g_iWebRoundDefuses[ iPlayer ] );
+
+        if ( AppendWebRoundData( iLen, szPart ) )
+        {
+            bFirst = false;
+        }
+    }
+
+    // Siempre queda lugar para el cierre: AppendWebRoundData reserva 8 celdas.
+    copy( g_szWebRoundData[ iLen ], WEB_ROUND_DATA_LEN - 1 - iLen, "]}" );
+
+    ResetWebRoundLog( );
+
+    new iRet;
+    ExecuteForward( g_iFwdWebRound, iRet, g_iWebPendingRound, g_iWebPendingHalf, g_iWebPendingWinner,
+        g_szWebPendingReason, g_szWebPendingSideA, g_iWebPendingScoreA, g_iWebPendingScoreB, g_szWebRoundData );
+}
+
+public OnWebThrowFlashbang_Post( const iId, Float:vecStart[ 3 ], Float:vecVelocity[ 3 ], Float:flTime )
+{
+    if ( IsWebRoundLogging( ) && iId >= 1 && iId <= MaxClients )
+    {
+        g_iWebRoundFlashes[ iId ]++;
+    }
+}
+
+public OnWebPlantBomb_Post( const iId, Float:vecStart[ 3 ], Float:vecVelocity[ 3 ] )
+{
+    if ( IsWebRoundLogging( ) && iId >= 1 && iId <= MaxClients )
+    {
+        g_iWebRoundPlants[ iId ]++;
+    }
+}
+
+public OnWebDefuseBombEnd_Post( const iBomb, const iId, bool:bDefused )
+{
+    if ( bDefused && IsWebRoundLogging( ) && iId >= 1 && iId <= MaxClients )
+    {
+        g_iWebRoundDefuses[ iId ]++;
     }
 }
 
@@ -943,6 +1253,13 @@ public OnPlayerTakeDamage_Post( const iVictim, const iInflictor, const iAttacker
     g_iRoundDamage[ iAttacker ][ iVictim ] += iApplied;
     g_iRoundHits[ iAttacker ][ iVictim ]++;
 
+    g_bWebLastHitHe[ iVictim ] = ( iDamageBits & DMG_GRENADE ) != 0;
+
+    if ( g_bWebLastHitHe[ iVictim ] )
+    {
+        g_iWebRoundHeDamage[ iAttacker ] += iApplied;
+    }
+
     AddWebDamage( iAttacker, iApplied );
 }
 
@@ -1063,6 +1380,8 @@ public OnPlayerKilled_Post( const iVictim, const iAttacker, const iGib )
             }
 
             AwardAssists( iVictim, iAttacker );
+
+            LogWebKill( iVictim, iAttacker );
         }
 
         remove_task( TASK_SHOW_ROUND_DAMAGE + iVictim );
@@ -1120,6 +1439,27 @@ public OnRoundFreezeEnd_Pre( )
     if ( g_bMatchPaused )
     {
         return HC_SUPERCEDE;
+    }
+
+    if ( IsWebRoundLogging( ) )
+    {
+        g_flWebRoundStart = get_gametime( );
+        g_iWebRoundMoneyA = 0;
+        g_iWebRoundMoneyB = 0;
+
+        for ( new iPlayer = 1; iPlayer <= MaxClients; iPlayer++ )
+        {
+            if ( !GetPlayerBit( g_iIsConnected, iPlayer ) )
+            {
+                continue;
+            }
+
+            switch ( g_sPlayers[ iPlayer ][ Player_Team ] )
+            {
+                case MIX_TEAM_A: g_iWebRoundMoneyA += get_member( iPlayer, m_iAccount );
+                case MIX_TEAM_B: g_iWebRoundMoneyB += get_member( iPlayer, m_iAccount );
+            }
+        }
     }
 
     return HC_CONTINUE;
@@ -1323,7 +1663,7 @@ public OnRoundEnd_Pre( const WinStatus:iStatus, const ScenarioEventEndRound:iEve
     
     if ( iRealStatus == MIX_LIVE || iRealStatus == MIX_OVERTIME )
     {
-        HandleMatchRoundEnd( iStatus );
+        HandleMatchRoundEnd( iStatus, iEvent );
 
         /* La ronda decisiva ya la cierra FinishMatch en este mismo hook.
          * No dejamos que el motor programe su restart con el delay normal:
@@ -1357,6 +1697,8 @@ public OnRestartRound_Pre( )
     {
         return HC_SUPERCEDE;
     }
+
+    FlushWebRound( );
 
     /* Este es el restart natural que ya habia programado la ronda terminada.
      * Se aplica el swap antes de que el motor respawnee; no se dispara un
@@ -2331,7 +2673,7 @@ GetRealMixStatus( )
     return g_iMixStatus;
 }
 
-HandleMatchRoundEnd( const WinStatus:iStatus )
+HandleMatchRoundEnd( const WinStatus:iStatus, const ScenarioEventEndRound:iEvent )
 {
     new iWinnerTeam = 0;
     
@@ -2372,6 +2714,7 @@ HandleMatchRoundEnd( const WinStatus:iStatus )
     ShowScore( );
 
     NotifyWebScore( );
+    MarkWebRoundEnded( iWinnerTeam, iEvent );
 
     new iTotalRounds = g_sMatch[ Match_ScoreA ] + g_sMatch[ Match_ScoreB ];
 
@@ -2468,6 +2811,8 @@ ResetMixState( )
     }
     g_iWebRosterCount = 0;
     g_iWebTeamSize = 0;
+    g_bWebRoundPending = false;
+    ResetWebRoundLog( );
     g_szWebMode[ 0 ] = EOS;
     copy( g_szMenuTitle, charsmax( g_szMenuTitle ), "#16 AUTOMIX" );
     g_flWebTeamEloA = 1000.0;
@@ -4143,6 +4488,8 @@ FinishMatch( )
         return;
     }
 
+    FlushWebRound( );
+
     g_iMixStatus = MIX_FINISHED;
 
     /* Dejar el TAB en el resultado de verdad.
@@ -4766,6 +5113,8 @@ public _mix_web_clear_roster( iPlugin, iParams )
 {
     g_iWebRosterCount = 0;
     g_iWebTeamSize = 0;
+    g_bWebRoundPending = false;
+    ResetWebRoundLog( );
     g_szWebMode[ 0 ] = EOS;
     copy( g_szMenuTitle, charsmax( g_szMenuTitle ), "#16 AUTOMIX" );
     g_flWebTeamEloA = 1000.0;

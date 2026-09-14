@@ -205,3 +205,26 @@ forward mix_web_player_joined( const iAccId );
 * @noreturn
 */
 forward mix_web_score_changed( const iScoreA, const iScoreB, const iHalf );
+
+/**
+* Se llama cuando termina de verdad una ronda LIVE, con su registro completo.
+*
+* Llega en el restart de la ronda siguiente (o al cerrar la partida), para que
+* entren las bajas de despues del final de ronda. Solo informa: no cambia nada
+* del partido.
+*
+* @param iRound         Numero de ronda: la suma del marcador al terminarla.
+* @param iHalf          1 = primer tiempo, 2 = segundo, 3+ = overtime.
+* @param iWinner        MIX_TEAM_A o MIX_TEAM_B.
+* @param szReason       "eliminacion", "bomba", "desactivacion", "tiempo" u "otro".
+* @param szSideA        Lado del equipo A en esa ronda: "T" o "CT".
+* @param iScoreA        Marcador del equipo A despues de la ronda.
+* @param iScoreB        Marcador del equipo B despues de la ronda.
+* @param szData         JSON con plata al empezar (ma, mb), vivos al final (va, vb),
+*                       bajas k[[segundo, atacante, victima, arma, hs, asistente]],
+*                       daño d[[atacante, victima, daño]] y utilidad
+*                       u[[cuenta, daño HE, flashes, plantas, desactivaciones]].
+*
+* @noreturn
+*/
+forward mix_web_round_ended( const iRound, const iHalf, const iWinner, const szReason[ ], const szSideA[ ], const iScoreA, const iScoreB, const szData[ ] );
