@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_dm_queue` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `accid` int(11) NOT NULL,
   `proposal_id` int(11) NOT NULL,
-  `mode` enum('5v5','2v2') NOT NULL DEFAULT '5v5',
+  `mode` enum('5v5','2v2','1v1') NOT NULL DEFAULT '5v5',
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
   `sent_at` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_dm_queue` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_elo` (
   `accid` int(11) NOT NULL,
-  `mode` enum('5v5','2v2') NOT NULL DEFAULT '5v5',
+  `mode` enum('5v5','2v2','1v1') NOT NULL DEFAULT '5v5',
   `elo` int(11) NOT NULL DEFAULT 1000,
   `matches` int(11) NOT NULL DEFAULT 0,
   `wins` int(11) NOT NULL DEFAULT 0,
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_elo` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_lobbies` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
-  `mode` enum('5v5','2v2') NOT NULL DEFAULT '5v5',
+  `mode` enum('5v5','2v2','1v1') NOT NULL DEFAULT '5v5',
+  `match_number` int(10) unsigned DEFAULT NULL COMMENT 'Numero de partida dentro de su modalidad; es lo que se ve en la web',
   `status` enum('draft','mapban','ready','live','finished','cancelled') NOT NULL DEFAULT 'draft',
   `captain_a_accid` int(11) NOT NULL COMMENT 'Capitan del equipo A',
   `captain_b_accid` int(11) NOT NULL COMMENT 'Capitan del equipo B',
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_lobbies` (
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_mode_number` (`mode`,`match_number`),
   KEY `idx_created_at` (`created_at`),
   KEY `idx_claimable` (`status`,`claimed_at`),
   KEY `idx_recreated_from` (`recreated_from`),
@@ -78,6 +80,15 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_lobbies` (
   KEY `idx_mix_lobbies_mode_status_finished` (`mode`,`status`,`finished_at`),
   KEY `idx_mix_lobbies_mode_claimable` (`mode`,`status`,`claimed_at`,`is_test`,`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+-- Cada modalidad numera sus partidas por separado: el 1v1 #1 no tiene nada que
+-- ver con el 5v5 #1. El contador vive aparte para que dos partidas que se arman
+-- a la vez no se peleen el mismo numero.
+CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_match_counters` (
+  `mode` enum('5v5','2v2','1v1') NOT NULL,
+  `last_number` int(10) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`mode`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_lobby_chat_messages` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   `lobby_id` int(11) NOT NULL,
@@ -162,7 +173,7 @@ ALTER TABLE `zgaming_web`.`mix_penalties` ADD COLUMN IF NOT EXISTS `manual_reaso
 ALTER TABLE `zgaming_web`.`mix_penalties` ADD COLUMN IF NOT EXISTS `manual_by` int(11) DEFAULT NULL COMMENT 'accid de Core que lo puso' AFTER `manual_reason`;
 CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_queue` (
   `accid` int(11) NOT NULL COMMENT 'Cuenta del jugador (accsys)',
-  `mode` enum('5v5','2v2') NOT NULL DEFAULT '5v5',
+  `mode` enum('5v5','2v2','1v1') NOT NULL DEFAULT '5v5',
   `nickname` varchar(64) NOT NULL COMMENT 'Nick al momento de entrar a la cola',
   `joined_at` timestamp NOT NULL DEFAULT current_timestamp() COMMENT 'Orden FIFO de la cola',
   `heartbeat_at` timestamp NOT NULL DEFAULT current_timestamp() COMMENT 'Ultimo poll del cliente; sirve para expulsar clientes muertos',
@@ -193,7 +204,7 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_rewards` (
 CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_declines` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `accid` int(11) NOT NULL,
-  `mode` enum('5v5','2v2') NOT NULL DEFAULT '5v5',
+  `mode` enum('5v5','2v2','1v1') NOT NULL DEFAULT '5v5',
   `strike` tinyint(3) unsigned NOT NULL COMMENT 'Que numero de rechazo era en ese momento',
   `penalty_seconds` int(11) NOT NULL,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
@@ -222,6 +233,7 @@ CREATE TABLE IF NOT EXISTS `zgaming_web`.`mix_match_rounds` (
   `half` tinyint(3) unsigned NOT NULL COMMENT '1, 2, 3+ = overtime',
   `winner` enum('A','B') NOT NULL,
   `reason` enum('eliminacion','bomba','desactivacion','tiempo','otro') NOT NULL DEFAULT 'otro',
+  `segment` enum('rifle','awp','pistol','knife') DEFAULT NULL COMMENT 'Arma del tramo; solo 1v1',
   `side_a` enum('T','CT') NOT NULL COMMENT 'Lado del equipo A en esa ronda',
   `score_a` smallint(5) unsigned NOT NULL,
   `score_b` smallint(5) unsigned NOT NULL,
@@ -619,7 +631,7 @@ BEGIN
     COMMIT;
 
     SELECT id, map, server_password, score_a, score_b, half, mode,
-           CASE mode WHEN '2v2' THEN 2 ELSE 5 END AS team_size
+           CASE mode WHEN '1v1' THEN 1 WHEN '2v2' THEN 2 ELSE 5 END AS team_size
     FROM zgaming_web.mix_lobbies
     WHERE id = v_lobby_id;
 
@@ -879,7 +891,7 @@ BEGIN
     LIMIT 1;
 
     SELECT id, map, server_password, score_a, score_b, half, mode,
-           CASE mode WHEN '2v2' THEN 2 ELSE 5 END AS team_size
+           CASE mode WHEN '1v1' THEN 1 WHEN '2v2' THEN 2 ELSE 5 END AS team_size
     FROM zgaming_web.mix_lobbies
     WHERE id = v_lobby_id;
 
@@ -1079,16 +1091,18 @@ proc: BEGIN
     START TRANSACTION;
 
     INSERT INTO zgaming_web.mix_match_rounds
-        (lobby_id, round, half, winner, reason, side_a, score_a, score_b, money_a, money_b, alive_a, alive_b)
+        (lobby_id, round, half, winner, reason, segment, side_a, score_a, score_b, money_a, money_b, alive_a, alive_b)
     VALUES
         (p_lobby_id, p_round, GREATEST(COALESCE(p_half, 1), 1), p_winner,
          IF(p_reason IN ('eliminacion', 'bomba', 'desactivacion', 'tiempo'), p_reason, 'otro'),
+         NULLIF(JSON_VALUE(v_data, '$.sg'), ''),
          IF(p_side_a = 'CT', 'CT', 'T'),
          GREATEST(COALESCE(p_score_a, 0), 0), GREATEST(COALESCE(p_score_b, 0), 0),
          COALESCE(JSON_VALUE(v_data, '$.ma'), 0), COALESCE(JSON_VALUE(v_data, '$.mb'), 0),
          COALESCE(JSON_VALUE(v_data, '$.va'), 0), COALESCE(JSON_VALUE(v_data, '$.vb'), 0))
     ON DUPLICATE KEY UPDATE
-        half = VALUES(half), winner = VALUES(winner), reason = VALUES(reason), side_a = VALUES(side_a),
+        half = VALUES(half), winner = VALUES(winner), reason = VALUES(reason),
+        segment = VALUES(segment), side_a = VALUES(side_a),
         score_a = VALUES(score_a), score_b = VALUES(score_b), money_a = VALUES(money_a),
         money_b = VALUES(money_b), alive_a = VALUES(alive_a), alive_b = VALUES(alive_b);
 
@@ -1239,6 +1253,100 @@ BEGIN
         half = p_half,
         started_at = COALESCE(started_at, NOW())
     WHERE id = p_lobby_id AND status = 'live';
+END$$
+
+-- ---------------------------------------------------------------------------
+-- 1v1 de la web (servidor ARENA)
+--
+-- La arena no es como los servidores de MIX: corre varias series a la vez en
+-- el mismo mapa, porque los rivales no se ven ni chocan entre si. Por eso el
+-- 1v1 no usa MixClaimLobbyV2 (una sala por servidor) sino estos dos:
+--   * Mix1v1Claim toma la siguiente serie lista, prefiriendo las del mapa que
+--     ya esta puesto; solo agarra una de otro mapa si el servidor avisa que
+--     puede cambiarlo (p_allow_map_change = 1, es decir, no hay ninguna serie
+--     web en curso).
+--   * Mix1v1GetSeries devuelve todas las series vivas del servidor con su
+--     roster, para rearmarlas despues de un cambio de mapa o un reinicio.
+-- ---------------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS `zgaming_web`.`Mix1v1Claim`$$
+CREATE PROCEDURE `zgaming_web`.`Mix1v1Claim`(
+    IN p_server_id INT,
+    IN p_current_map VARCHAR(64),
+    IN p_allow_map_change TINYINT
+)
+BEGIN
+    DECLARE v_lobby_id INT DEFAULT NULL;
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    SELECT id INTO v_lobby_id
+    FROM zgaming_web.mix_lobbies
+    WHERE status = 'ready'
+      AND claimed_at IS NULL
+      AND is_test = 0
+      AND mode = '1v1'
+      AND (map = p_current_map OR p_allow_map_change = 1)
+    ORDER BY (map = p_current_map) DESC, id ASC
+    LIMIT 1
+    FOR UPDATE;
+
+    IF v_lobby_id IS NOT NULL THEN
+        UPDATE zgaming_web.mix_lobbies
+        SET status = 'live',
+            server_id = p_server_id,
+            claimed_at = NOW(),
+            heartbeat_at = NOW(),
+            join_deadline = DATE_ADD(NOW(), INTERVAL 5 MINUTE)
+        WHERE id = v_lobby_id AND claimed_at IS NULL;
+
+        IF ROW_COUNT() = 0 THEN
+            SET v_lobby_id = NULL;
+        END IF;
+    END IF;
+
+    COMMIT;
+
+    SELECT id, map, server_password, score_a, score_b, half, mode, 1 AS team_size
+    FROM zgaming_web.mix_lobbies
+    WHERE id = v_lobby_id;
+
+    SELECT accid,
+           CASE team WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 0 END AS team
+    FROM zgaming_web.mix_lobby_players
+    WHERE lobby_id = v_lobby_id
+      AND team IS NOT NULL
+      AND abandoned_at IS NULL
+    ORDER BY team;
+END$$
+
+DROP PROCEDURE IF EXISTS `zgaming_web`.`Mix1v1GetSeries`$$
+CREATE PROCEDURE `zgaming_web`.`Mix1v1GetSeries`(IN p_server_id INT)
+BEGIN
+    SELECT id, map, server_password, score_a, score_b, half
+    FROM zgaming_web.mix_lobbies
+    WHERE server_id = p_server_id
+      AND mode = '1v1'
+      AND status = 'live'
+      AND is_test = 0
+    ORDER BY id ASC;
+
+    SELECT p.lobby_id, p.accid,
+           CASE p.team WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 0 END AS team
+    FROM zgaming_web.mix_lobby_players p
+    JOIN zgaming_web.mix_lobbies l ON l.id = p.lobby_id
+    WHERE l.server_id = p_server_id
+      AND l.mode = '1v1'
+      AND l.status = 'live'
+      AND l.is_test = 0
+      AND p.team IS NOT NULL
+      AND p.abandoned_at IS NULL
+    ORDER BY p.lobby_id, p.team;
 END$$
 
 DELIMITER ;
