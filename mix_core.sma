@@ -290,8 +290,6 @@ new g_iReconnectScoreDeaths[ MAX_PLAYERS + 1 ];
 new bool:g_bReconnectHasDefuser[ MAX_PLAYERS + 1 ];
 
 new Float:g_flSavedBuytime;
-new g_iPauseMoney[ MAX_PLAYERS + 1 ];
-new bool:g_bPauseMoneySaved[ MAX_PLAYERS + 1 ];
 
 new g_iPhaseBreakCountdown;
 new g_iPhaseTransition;
@@ -834,8 +832,6 @@ public client_putinserver( iId )
     ClearPlayerBit( g_iIsReady, iId );
     
     ResetPlayerData( iId );
-    g_iPauseMoney[ iId ] = 0;
-    g_bPauseMoneySaved[ iId ] = false;
     g_iReconnectMoney[ iId ] = 0;
     g_iReconnectFrags[ iId ] = -1;
     g_bReconnectHasWeapons[ iId ] = false;
@@ -885,8 +881,6 @@ public client_disconnected( iId )
     g_sPlayers[ iId ][ Player_AccId ] = 0;
     g_sPlayers[ iId ][ Player_Name ][ 0 ] = EOS;
     g_sPlayers[ iId ][ Player_Title ][ 0 ] = EOS;
-    g_iPauseMoney[ iId ] = 0;
-    g_bPauseMoneySaved[ iId ] = false;
     g_iReconnectMoney[ iId ] = 0;
     g_iReconnectFrags[ iId ] = -1;
     g_bReconnectHasWeapons[ iId ] = false;
@@ -2848,11 +2842,6 @@ ShowScore( )
 
 ResetMixState( )
 {
-    if ( g_bMatchPaused )
-    {
-        RestorePauseEconomy( );
-    }
-
     for ( new i = 0; i < MAX_MIX_PLAYERS; i++ )
     {
         g_iWebRosterAccId[ i ] = 0;
@@ -2931,8 +2920,6 @@ ResetMixState( )
     {
         remove_task( iPlayer );
         ResetPlayerData( iPlayer );
-        g_iPauseMoney[ iPlayer ] = 0;
-        g_bPauseMoneySaved[ iPlayer ] = false;
         g_iReconnectMoney[ iPlayer ] = 0;
         g_iReconnectFrags[ iPlayer ] = -1;
         g_bReconnectHasWeapons[ iPlayer ] = false;
@@ -3956,42 +3943,12 @@ ApplyFreezeStateToAll( )
     }
 }
 
-SavePauseEconomy( )
-{
-    for ( new iPlayer = 1; iPlayer <= MaxClients; iPlayer++ )
-    {
-        if ( !GetPlayerBit( g_iIsConnected, iPlayer ) )
-        {
-            continue;
-        }
-
-        g_iPauseMoney[ iPlayer ] = get_member( iPlayer, m_iAccount );
-        g_bPauseMoneySaved[ iPlayer ] = true;
-    }
-}
-
-RestorePauseEconomy( )
-{
-    for ( new iPlayer = 1; iPlayer <= MaxClients; iPlayer++ )
-    {
-        if ( g_bPauseMoneySaved[ iPlayer ] && GetPlayerBit( g_iIsConnected, iPlayer ) )
-        {
-            rg_add_account( iPlayer, g_iPauseMoney[ iPlayer ], AS_SET );
-        }
-
-        g_iPauseMoney[ iPlayer ] = 0;
-        g_bPauseMoneySaved[ iPlayer ] = false;
-    }
-}
-
 PauseMatch( const iRequestor, const bool:bAutomatic )
 {
     if ( g_bMatchPaused )
     {
         return;
     }
-
-    SavePauseEconomy( );
 
     g_bMatchPaused = true;
     g_iStatusBeforePause = g_iMixStatus;
@@ -4019,6 +3976,10 @@ PauseMatch( const iRequestor, const bool:bAutomatic )
 
     // Despues de la bandera, nunca antes: ResetMaxSpeed la lee para decidir.
     ApplyFreezeStateToAll( );
+    /* La ronda todavia no empieza, asi que comprar sigue permitido: -1 es
+     * tiempo de compra ilimitado en ReGameDLL y evita que la pausa consuma el
+     * plazo de compra. Lo comprado se conserva y el dinero nunca se devuelve:
+     * reponerlo al reanudar regalaba lo comprado durante la pausa. */
     g_flSavedBuytime = get_cvar_float( "mp_buytime" );
     set_cvar_num( "mp_buytime", -1 );
     
@@ -4057,7 +4018,6 @@ UnpauseMatch( const iRequestor )
     }
     
     set_cvar_float( "mp_buytime", g_flSavedBuytime );
-    RestorePauseEconomy( );
 
     /* La ronda ya fue creada por el restart natural. Reanudar significa soltar
      * ese mismo freezetime, no respawnear otra vez ni recalcular economia. */
@@ -4105,7 +4065,6 @@ ResumeMatchForSurrender( )
     g_flFreezeTimeLeft = 0.0;
 
     set_cvar_float( "mp_buytime", g_flSavedBuytime );
-    RestorePauseEconomy( );
 
     /* El timeout ya resolvio la espera: se libera el freeze actual una sola
      * vez y la ronda continua desde ese momento. No se llama RestartRound() ni
